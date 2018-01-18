@@ -767,6 +767,8 @@ endif
 # Always append ALL so that arch config.mk's can add custom ones
 ALL-y += u-boot.srec u-boot.bin u-boot.sym System.map binary_size_check
 
+ALL-y += fip.bin boot.bin
+
 ALL-$(CONFIG_ONENAND_U_BOOT) += u-boot-onenand.bin
 ifeq ($(CONFIG_SPL_FSL_PBL),y)
 ALL-$(CONFIG_RAMBOOT_PBL) += u-boot-with-spl-pbl.bin
@@ -1005,6 +1007,49 @@ endif
 quiet_cmd_cpp_cfg = CFG     $@
 cmd_cpp_cfg = $(CPP) -Wp,-MD,$(depfile) $(cpp_flags) $(LDPPFLAGS) -ansi \
 	-DDO_DEPS_ONLY -D__ASSEMBLY__ -x assembler-with-cpp -P -dM -E -o $@ $<
+
+# =========+SPECIFIC FOR AMLOGIC S9XXX=========
+FIP_FOLDER := $(srctree)/fip
+FIP_FOLDER_SOC := $(FIP_FOLDER)/gxb
+FIP_ARGS += --bl30 $(FIP_FOLDER_SOC)/bl30.bin
+FIP_ARGS += --bl301 $(FIP_FOLDER_SOC)/bl301.bin
+FIP_ARGS += --bl31 $(FIP_FOLDER_SOC)/bl31.bin
+FIP_ARGS += --bl33 $(FIP_FOLDER_SOC)/bl33.bin
+
+.PHONY: fip.bin
+fip.bin: tools prepare u-boot.bin
+	$(Q)echo "Copy bl33.bin, SOC: $(SOC)"
+	$(Q)cp u-boot.bin $(FIP_FOLDER_SOC)/bl33.bin
+	$(Q)$(FIP_FOLDER)/fip_create ${FIP_ARGS} $(FIP_FOLDER_SOC)/fip.bin
+	$(Q)$(FIP_FOLDER)/fip_create --dump $(FIP_FOLDER_SOC)/fip.bin
+
+.PHONY : boot.bin
+boot.bin: fip.bin
+	$(Q)sed 's/\x73\x02\x08\x91/\x1F\x20\x03\xD5/' $(FIP_FOLDER_SOC)/bl2.bin > $(FIP_FOLDER_SOC)/bl2_nop.bin
+	$(Q)python $(FIP_FOLDER)/acs_tool.pyc $(FIP_FOLDER_SOC)/bl2_nop.bin $(FIP_FOLDER_SOC)/bl2_acs.bin $(FIP_FOLDER_SOC)/acs.bin 0
+	$(Q)$(FIP_FOLDER)/blx_fix.sh \
+		$(FIP_FOLDER_SOC)/bl2_acs.bin \
+		$(FIP_FOLDER_SOC)/zero_tmp \
+		$(FIP_FOLDER_SOC)/bl2_zero.bin \
+		$(FIP_FOLDER_SOC)/bl21.bin \
+		$(FIP_FOLDER_SOC)/bl21_zero.bin \
+		$(FIP_FOLDER_SOC)/bl2_new.bin \
+		bl2
+	$(Q)cat $(FIP_FOLDER_SOC)/bl2_new.bin  $(FIP_FOLDER_SOC)/fip.bin > $(FIP_FOLDER_SOC)/boot_new.bin
+	$(Q)$(FIP_FOLDER_SOC)/aml_encrypt_gxb --bootsig --input $(FIP_FOLDER_SOC)/boot_new.bin  --output $(FIP_FOLDER_SOC)/u-boot.bin
+
+	$(Q)dd if=$(FIP_FOLDER_SOC)/u-boot.bin of=$(FIP_FOLDER_SOC)/u-boot.bin.hardkernel bs=512 conv=fsync
+	$(Q)dd if=$(FIP_FOLDER_SOC)/u-boot.bin of=$(FIP_FOLDER_SOC)/u-boot.bin.hardkernel bs=512 seek=9 skip=8 count=87 conv=fsync,notrunc
+	$(Q)dd if=/dev/zero of=$(FIP_FOLDER_SOC)/u-boot.bin.hardkernel bs=512 seek=8 count=1 conv=fsync,notrunc
+	# Add code that copies bl2 from 4608 to 4096
+	$(Q)dd if=$(FIP_FOLDER_SOC)/bl1.bin.hardkernel of=$(FIP_FOLDER_SOC)/u-boot.bin.hardkernel bs=512 seek=2 skip=2 count=1 conv=fsync,notrunc
+	# Write headers with correct offsets and checksums
+	$(Q)$(FIP_FOLDER_SOC)/aml_chksum $(FIP_FOLDER_SOC)/u-boot.bin.hardkernel
+	@cp -f $(FIP_FOLDER_SOC)/u-boot.* $(FIP_FOLDER)/
+	@rm -f $(FIP_FOLDER_SOC)/bl2_new.bin $(FIP_FOLDER_SOC)/boot_new.bin
+	@echo '$(FIP_FOLDER_SOC)/u-boot.bin build done!'
+
+# ===========END OF AMLOGIC ===================
 
 # Boards with more complex image requirments can provide an .its source file
 # or a generator script
